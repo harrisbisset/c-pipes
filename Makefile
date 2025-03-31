@@ -28,3 +28,6 @@ Pipeline.o: Pipeline.c Pipeline.h
 
 clean:
 	$(RM) SumSquaresPipeline SievePipeline *.o
+
+test: clean all
+	./SievePipeline < sieve1.in

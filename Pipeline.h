@@ -10,12 +10,14 @@
 
 typedef void (*Function)(int input, int output);
 
-/* You should define your struct Pipeline here */
-typedef struct Pipeline {
-    int pid;
-    int f_len;
-    int f_pos;
-    Function* functions;
+typedef struct FunctionNode {
+    struct FunctionNode* next;
+    Function f;
+} FunctionNode;
+
+typedef struct Pipeline {    
+    FunctionNode* start_node;
+    FunctionNode* end_node;
 } Pipeline;
 
 /*
