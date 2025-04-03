@@ -62,25 +62,30 @@ static void recurse_pipeline(FunctionNode* node, int input) {
     // if fork() == 0, then we are in the child process
     if (!parent) {
         
-        if (input < 0) err(dup2(input, p[0]), "duplicating an fd");
+        // if input is an fd
+        if (input > 0) err(dup2(input, p[0]), "duplicating input to pipe");
 
         // close since we're not using them here
         close(p[1]);
-        close(input);
+        if (input > 0) close(input);
 
         node->f(p[0], p[1]);
 
-        exit(EXIT_FAILURE);
+        exit(EXIT_SUCCESS);
 
     } else {
         int status;
-        waitpid(-1, &status, 0);
-        err(dup2(p[1], input),  "duplicating an fd"); // p[1] == execve() stdout
+        err(wait(&status), "waiting for the child process to finish");
 
-        close(p[0]);
+        if (!WIFEXITED(status)) return; // exited abnormally
+        if (WEXITSTATUS(status) != EXIT_SUCCESS) return; // exited in failure
+
+        err(dup2(p[1], input),  "duplicating an pipe output to input");
+
+        close(p[0]); // close since we're not using it anymore
 
         recurse_pipeline(node->next, input);
-        exit(EXIT_FAILURE);
+        exit(EXIT_SUCCESS);
     }
 }
 
