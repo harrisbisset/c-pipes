@@ -13,11 +13,10 @@
 #include "Pipeline.h"
 
 #define err(val, what) ({ \
-    if ((val) == -1) { \
-        perror((what)); \
+    if (val < 0) { \
+        perror(what); \
         exit(EXIT_FAILURE); \
     } \
-    return; \
 })
 
 Pipeline* new_Pipeline() {
@@ -63,7 +62,7 @@ static void recurse_pipeline(FunctionNode* node, int input) {
     // if fork() == 0, then we are in the child process
     if (!parent) {
         
-        if (input != -1) err(dup2(input, p[0]), "duplicating an fd");
+        if (input < 0) err(dup2(input, p[0]), "duplicating an fd");
 
         // close since we're not using them here
         close(p[1]);
