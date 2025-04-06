@@ -5,18 +5,19 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
 #include <errno.h>
 #include <sys/wait.h>
-#include <fcntl.h>
 
 #include "Pipeline.h"
 
-static void err(const char* msg) {
-    perror(msg);
-    exit(EXIT_FAILURE);
-}
+#define err(val, child, msg) ({                     \
+    if (val < 0) {                                  \
+        perror(msg);                                \
+        if (child) exit(EXIT_FAILURE);              \
+        else return;                                \
+    }                                               \
+})                                                  \
 
 Pipeline* new_Pipeline() {
     Pipeline* p = (Pipeline*)malloc(sizeof(Pipeline));
@@ -38,8 +39,10 @@ bool Pipeline_add(Pipeline* this, Function f) {
     if (this->start_node == NULL) {
         this->start_node = node;
         this->end_node = node;
-    } else if (this->end_node == NULL) return false; // something's gone wrong
-    else {
+    } else if (this->end_node == NULL) {
+        fprintf(stderr, "end_node not set to null, when it's expected to be\n");
+        return false; // something's gone wrong
+    } else {
         this->end_node->next = node;
         this->end_node = node;
     }
@@ -47,68 +50,62 @@ bool Pipeline_add(Pipeline* this, Function f) {
     return true;
 }
 
-static void close_fd(int fd) {
-    do {
-        if (close(fd) < 0) {
-            perror("closing fd");
-            fprintf(stderr, "%s:%d: closing file descriptor: %d\n", __FILE__, __LINE__, fd);
-        }
-    } while (0);
-}
-
-static void dup_fd2(int oldfd, int newfd) {
-    if (oldfd == newfd) return;
-    printf("hello1\n\n");
-
-    dup2(oldfd, newfd);
-    printf("hello2\n\n");
-
-    close_fd(oldfd);
-    printf("hello3\n\n");
-}
-
 static void recurse_pipeline(FunctionNode* node, int input) {
     if (node == NULL) return;
 
-    pid_t parent;
+    pid_t pid;
     int p1[2];
     int p2[2];
+    int function_success = 0; // used to check whether a function caused the child process to fail
 
-    if (pipe(p1) < 0) err("creating pipeline");
-    if (pipe(p2) < 0) err("creating pipeline");
+    err(pipe(p1), 0, "creating pipeline");
+    err(pipe(p2), 0, "creating pipeline");
 
-    parent = fork();
-    if (parent < 0) err("creating a fork");
+    pid = fork();
+    err(pid, 0, "creating a fork");
 
     // if fork() == 0, then we are in the child process
-    if (parent == 0) {
-        close_fd(p1[0]); //unused
+    if (pid == 0) {
+        err(p1[0], 1, "closing fd"); // unused
 
-        if (dup2(input, p2[0]) == -1) /*read from in_fd */
-            perror("Failed to redirect stdin");
-        if (dup2(p1[1], p2[1]) == -1)   /*write to fd[1]*/
-            perror("Failed to redirect stdout");
+        err(dup2(input, p2[0]), 1, "failed to copy to input pipe");
+        err(dup2(p1[1], p2[1]), 1, "failed to copy to output pipe");
 
-        // dup_fd2(input, STDIN_FILENO);
-        // dup_fd2(p[1], STDOUT_FILENO);
-
+        function_success = 0;
         node->f(p2[0], p2[1]);
+        function_success = 1;
+
+        // if the function set an error, but didn't exit
+        if (errno != 0) {
+            perror("function failed");
+            exit(EXIT_FAILURE);
+        };
 
         exit(EXIT_SUCCESS);
 
     // fork() > 0, then we are in the parent process
     } else {
+
+        // waits for the child process (0) to finish
         int status;
-        if (wait(&status) < 0) err("waiting for the child process to finish");
+        err(waitpid(pid, &status, 0), 0, "waitpid failed");
+        
+        // if process exited with exit() or _exit
+        if (!WIFEXITED(status)) {
+            fprintf(stderr, "child process exited abnormally\n");
+            return;
+        }
+        // if child process exited in failure
+        if (WEXITSTATUS(status) != EXIT_SUCCESS) {
+            if (!function_success) fprintf(stderr, "function caused child process to fail\n"); // if function caused child process to fail
+            fprintf(stderr, "process %i: child process exited in failure\n", getpid());
+            return;
+        }
 
-        // if (WIFEXITED(status) != 0) err("exited abnormally");
-        // if (WEXITSTATUS(status) != EXIT_SUCCESS) err("exited in failure");
-
-        close(p1[1]);
-        close(input);
+        err(close(p1[1]), 0, "closing output fd");
+        err(close(input), 0, "closing input fd");
 
         recurse_pipeline(node->next, p1[0]);
-        // exit(EXIT_SUCCESS);
     }
 }
 
