@@ -9,15 +9,14 @@
 #include <unistd.h>
 #include <errno.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 
 #include "Pipeline.h"
 
-#define err(val, what) ({ \
-    if (val < 0) { \
-        perror(what); \
-        exit(EXIT_FAILURE); \
-    } \
-})
+static void err(const char* msg) {
+    perror(msg);
+    exit(EXIT_FAILURE);
+}
 
 Pipeline* new_Pipeline() {
     Pipeline* p = (Pipeline*)malloc(sizeof(Pipeline));
@@ -48,50 +47,74 @@ bool Pipeline_add(Pipeline* this, Function f) {
     return true;
 }
 
+static void close_fd(int fd) {
+    do {
+        if (close(fd) < 0) {
+            perror("closing fd");
+            fprintf(stderr, "%s:%d: closing file descriptor: %d\n", __FILE__, __LINE__, fd);
+        }
+    } while (0);
+}
+
+static void dup_fd2(int oldfd, int newfd) {
+    if (oldfd == newfd) return;
+    printf("hello1\n\n");
+
+    dup2(oldfd, newfd);
+    printf("hello2\n\n");
+
+    close_fd(oldfd);
+    printf("hello3\n\n");
+}
+
 static void recurse_pipeline(FunctionNode* node, int input) {
     if (node == NULL) return;
 
     pid_t parent;
-    int p[2];
+    int p1[2];
+    int p2[2];
 
-    err(pipe(p), "creating pipeline");
+    if (pipe(p1) < 0) err("creating pipeline");
+    if (pipe(p2) < 0) err("creating pipeline");
 
     parent = fork();
-    err(parent, "creating a fork");
+    if (parent < 0) err("creating a fork");
 
     // if fork() == 0, then we are in the child process
-    if (!parent) {
-        
-        // if input is an fd
-        if (input > 0) err(dup2(input, p[0]), "duplicating input to pipe");
+    if (parent == 0) {
+        close_fd(p1[0]); //unused
 
-        // close since we're not using them here
-        close(p[1]);
-        if (input > 0) close(input);
+        if (dup2(input, p2[0]) == -1) /*read from in_fd */
+            perror("Failed to redirect stdin");
+        if (dup2(p1[1], p2[1]) == -1)   /*write to fd[1]*/
+            perror("Failed to redirect stdout");
 
-        node->f(p[0], p[1]);
+        // dup_fd2(input, STDIN_FILENO);
+        // dup_fd2(p[1], STDOUT_FILENO);
+
+        node->f(p2[0], p2[1]);
 
         exit(EXIT_SUCCESS);
 
+    // fork() > 0, then we are in the parent process
     } else {
         int status;
-        err(wait(&status), "waiting for the child process to finish");
+        if (wait(&status) < 0) err("waiting for the child process to finish");
 
-        if (!WIFEXITED(status)) return; // exited abnormally
-        if (WEXITSTATUS(status) != EXIT_SUCCESS) return; // exited in failure
+        // if (WIFEXITED(status) != 0) err("exited abnormally");
+        // if (WEXITSTATUS(status) != EXIT_SUCCESS) err("exited in failure");
 
-        err(dup2(p[1], input),  "duplicating an pipe output to input");
+        close(p1[1]);
+        close(input);
 
-        close(p[0]); // close since we're not using it anymore
-
-        recurse_pipeline(node->next, input);
-        exit(EXIT_SUCCESS);
+        recurse_pipeline(node->next, p1[0]);
+        // exit(EXIT_SUCCESS);
     }
 }
 
 void Pipeline_execute(Pipeline* this) {
     if (this == NULL) return;
-    recurse_pipeline(this->start_node, -1);
+    recurse_pipeline(this->start_node, STDIN_FILENO);
 }
 
 

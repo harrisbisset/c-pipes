@@ -5,6 +5,12 @@ GFLAGS = -Wall -Wextra
 CFLAGS = $(DFLAG) $(GFLAGS) -c
 LFLAGS = $(DFLAG) $(GFLAGS)
 
+run: SievePipeline start
+
+start:
+	- killall -s 9 SievePipeline
+	./SievePipeline < sieve1.in
+
 all: SumSquaresPipeline SievePipeline
 
 SumSquaresPipeline: SumSquaresPipeline.o Pipeline.o 
@@ -19,7 +25,6 @@ SievePipeline.o: SievePipeline.c
 
 SumSquaresPipeline.o: SumSquaresPipeline.c
 	$(CC) $(CFLAGS) SumSquaresPipeline.c
-
 
 
 Pipeline.o: Pipeline.c Pipeline.h
