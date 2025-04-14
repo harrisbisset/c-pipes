@@ -34,7 +34,7 @@ struct pipeline {
 #define check_null(val, msg, ret) ({                \
     if (val == NULL) {                              \
         if (errno != 0) perror(msg);                \
-        fprintf(stderr, "%s\n", msg);                 \
+        fprintf(stderr, "%s\n", msg);               \
         return ret;                                 \
     }                                               \
 })                                                  \
