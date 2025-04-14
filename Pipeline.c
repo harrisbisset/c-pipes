@@ -11,27 +11,49 @@
 
 #include "Pipeline.h"
 
+typedef struct FunctionNode {
+    struct FunctionNode* next;
+    Function f;
+} FunctionNode;
+
+struct pipeline {    
+    FunctionNode* start_node;
+    FunctionNode* end_node;
+};
+
+// used to check whether an error value is returned from a function inside pipeline execution
 #define err(val, child, msg) ({                     \
     if (val < 0) {                                  \
-        perror(msg);                                \
+        if (errno != 0) perror(msg);                \
         if (child) exit(EXIT_FAILURE);              \
         else return;                                \
     }                                               \
 })                                                  \
 
+// used to check whether a value to null, when it shouldn't be
+#define check_null(val, msg, ret) ({                \
+    if (val == NULL) {                              \
+        if (errno != 0) perror(msg);                \
+        fprintf(stderr, "%s\n", msg);                 \
+        return ret;                                 \
+    }                                               \
+})                                                  \
+
 Pipeline* new_Pipeline() {
     Pipeline* p = (Pipeline*)malloc(sizeof(Pipeline));
+    check_null(p, "pipeline not able to be instansiated", NULL);
     p->start_node = NULL;
     p->end_node = NULL;
     return p;
 }
 
 bool Pipeline_add(Pipeline* this, Function f) {
-    if (this == NULL || f == NULL) return false;
+    check_null(this, "pipeline null", false);
+    check_null(f, "function null", false);
 
     // create node
     FunctionNode* node = (FunctionNode*)malloc(sizeof(FunctionNode));
-    if (node == NULL) return false; // memory not allocated
+    check_null(node, "pipeline node not able to be instansiated", false);
     node->f = f;
     node->next = NULL;
 
@@ -39,9 +61,10 @@ bool Pipeline_add(Pipeline* this, Function f) {
     if (this->start_node == NULL) {
         this->start_node = node;
         this->end_node = node;
-    } else if (this->end_node == NULL) {
-        fprintf(stderr, "end_node not set to null, when it's expected to be\n");
-        return false; // something's gone wrong
+    // something has gone wrong, likely user has modified end_node
+    } else if (this->end_node == NULL) { 
+        fprintf(stderr, "end_node not set to null\n");
+        return false;
     } else {
         this->end_node->next = node;
         this->end_node = node;
@@ -110,13 +133,18 @@ static void recurse_pipeline(FunctionNode* node, int input) {
 }
 
 void Pipeline_execute(Pipeline* this) {
-    if (this == NULL) return;
+    if (this == NULL) {
+        fprintf(stderr, "pipeline null");
+        return;
+    }
     recurse_pipeline(this->start_node, STDIN_FILENO);
 }
 
-
 void Pipeline_free(Pipeline* this) {
-    if (this == NULL) return;
+    if (this == NULL) {
+        fprintf(stderr, "pipeline null");
+        return;
+    }
 
     // frees elements in linked list
     FunctionNode* temp;
