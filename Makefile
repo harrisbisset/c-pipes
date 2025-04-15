@@ -5,11 +5,12 @@ GFLAGS = -Wall -Wextra
 CFLAGS = $(DFLAG) $(GFLAGS) -c
 LFLAGS = $(DFLAG) $(GFLAGS)
 
-run: clean SievePipeline start
+run: clean SievePipeline SumSquaresPipeline start
 
 start:
 	- killall -s 9 SievePipeline
 	./SievePipeline < sieve1.in
+
 
 all: SumSquaresPipeline SievePipeline
 
