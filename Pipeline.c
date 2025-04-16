@@ -21,7 +21,7 @@
         if (child) exit(EXIT_FAILURE);                              \
         else {                                                      \
             if (errno == 0) fprintf(stderr, "error: %s\n", msg);    \
-            error_code = -1;                                        \
+            error_code = Other;                                     \
             raise(FAIL_SIG);                                        \
             return;                                                 \
         }                                                           \
@@ -66,7 +66,7 @@ int session = 0;
 int function_success = 0; // used to check whether a function caused the child process to fail
 sem_t pnum; // used to count the child processes
 
-static char* str_err(enum ERR_CODE c) {
+static const char* str_err(enum ERR_CODE c) {
     if (c == Abnormal) {
         return "child process exited abnormally";
     } else if (c == FunctionFailedInExit) {
@@ -82,34 +82,6 @@ static char* str_err(enum ERR_CODE c) {
     return "err_code not implemented";
 }
 
-static bool Pipeline_add(FDList* this, Function f) {
-    check_null(this, "pipeline null", false); 
-    check_null(f, "function null", false);
-
-    // create node
-    FunctionNode* node = (FunctionNode*)malloc(sizeof(FunctionNode));
-    check_null(node, "pipeline node not able to be instansiated", false);
-    node->f = f;
-    node->next = NULL;
-
-    // append node
-    if (this->start_node == NULL) {
-        this->start_node = node;
-        this->end_node = node;
-    // something has gone wrong, likely user has modified end_node
-    } else if (this->end_node == NULL) { 
-        fprintf(stderr, "end_node not set to null\n");
-        return false;
-    } else {
-        this->end_node->next = node;
-        this->end_node = node;
-    }
-
-    this->length++;
-
-    return true;
-}
-
 Pipeline* new_Pipeline() {
     Pipeline* p = (Pipeline*)malloc(sizeof(Pipeline));
     check_null(p, "pipeline not able to be instansiated", NULL);
@@ -118,8 +90,8 @@ Pipeline* new_Pipeline() {
     return p;
 }
 
-bool Pipeline_add(Pipeline* this, Function f) {
-    check_null(this, "pipeline null", false); 
+bool Pipeline_add(Pipeline* p, Function f) {
+    check_null(p, "pipeline null", false); 
     check_null(f, "function null", false);
 
     // create node
@@ -129,26 +101,25 @@ bool Pipeline_add(Pipeline* this, Function f) {
     node->next = NULL;
 
     // append node
-    if (this->start_node == NULL) {
-        this->start_node = node;
-        this->end_node = node;
+    if (p->start_node == NULL) {
+        p->start_node = node;
+        p->end_node = node;
     // something has gone wrong, likely user has modified end_node
-    } else if (this->end_node == NULL) { 
+    } else if (p->end_node == NULL) { 
         fprintf(stderr, "end_node not set to null\n");
         return false;
     } else {
-        this->end_node->next = node;
-        this->end_node = node;
+        p->end_node->next = node;
+        p->end_node = node;
     }
 
-    this->length++;
+    p->length++;
 
     return true;
 }
 
 // executed when child process exits
-static void child_handler(int sig, siginfo_t *info, void *context) {
-    if (sig != SIGCHLD) return;
+static void child_handler(int sig __attribute__((unused)), siginfo_t *info __attribute__((unused)), void *context __attribute__((unused))) {
 
     while (1) {
         int status;
@@ -193,7 +164,7 @@ static void recurse_pipeline(FunctionNode* node, int input) {
     catch_perr(pipe(p1) < 0, false, "creating pipeline");
     catch_perr(pipe(p2) < 0, false, "creating pipeline");
 
-    struct sigaction act = { 0 };
+    struct sigaction act;
     act.sa_flags = SA_SIGINFO;
     act.sa_sigaction = &child_handler;
     catch_perr(sigaction(SIGCHLD, &act, NULL) < 0, false, "sigaction faild");
@@ -234,50 +205,53 @@ static void recurse_pipeline(FunctionNode* node, int input) {
     // close(p2[1]);
 }
 
-void Pipeline_execute(Pipeline* this) {
-    if (this == NULL) {
+void Pipeline_execute(Pipeline* p) {
+    if (p == NULL) {
         fprintf(stderr, "pipeline null");
         return;
     }
 
     // create exit signal, which the program will wait for
-    sigset_t sig_exit;
-    siginfo_t info;
-    sigemptyset(&sig_exit);
-    sigaddset(&sig_exit, EXIT_SIG);
-    sigaddset(&sig_exit, FAIL_SIG);
-    catch_perr(sigprocmask(SIG_BLOCK, &sig_exit, NULL) < 0, false, "mask failed");    
+    sigset_t sig_set;
+    int sig;
+    sigemptyset(&sig_set);
+    sigaddset(&sig_set, EXIT_SIG);
+    sigaddset(&sig_set, FAIL_SIG);
+    catch_perr(sigprocmask(SIG_BLOCK, &sig_set, NULL) < 0, false, "mask failed");    
 
     // create semaphores to handle shared memory
-    catch_perr(sem_init(&pnum, 1, this->length) < 0, false, "pnum semaphore init");
+    catch_perr(sem_init(&pnum, 1, p->length) < 0, false, "pnum semaphore init");
     
     error_code = Default;
-    recurse_pipeline(this->start_node, -1); // start pipeline execution
+    recurse_pipeline(p->start_node, -1); // start pipeline execution
 
     // wait on all processes to finish
-    int signum = sigwaitinfo(&sig_exit, &info);
-    catch_perr(sigwaitinfo < 0, false, "sigwait faild");
-
+    int signum = sigwait(&sig_set, &sig);
     catch_perr(sem_destroy(&pnum) < 0, false, "failed to destroy pnum semaphore");
-    if (signum == FAIL_SIG) {
-        if (error_code != Other) fprintf(stderr, "%s\n", str_err(error_code));
-        kill(1, SIGTERM); // kills all children
-    };
+    if (signum == 0) {
+        if (sig == FAIL_SIG) {
+            if (error_code != Other) fprintf(stderr, "%s\n", str_err(error_code));
+            kill(1, SIGTERM); // kills all children
+        }
+    } else {
+        fprintf(stderr, "sigwait failed");
+        kill(1, SIGTERM); // kills all children, just to make sure
+    }
 }
 
-void Pipeline_free(Pipeline* this) {
-    if (this == NULL) {
+void Pipeline_free(Pipeline* p) {
+    if (p == NULL) {
         fprintf(stderr, "pipeline null");
         return;
     }
 
     // frees elements in linked list
     FunctionNode* temp;
-    while (this->start_node != NULL) {
-        temp = this->start_node;
-        this->start_node = this->start_node->next;
+    while (p->start_node != NULL) {
+        temp = p->start_node;
+        p->start_node = p->start_node->next;
         free(temp);
     }
 
-    free(this);
+    free(p);
 }

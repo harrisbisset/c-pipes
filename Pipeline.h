@@ -23,19 +23,19 @@ Pipeline* new_Pipeline();
 * Returns true on success and false if unable to add the new stage.
 * Will print to stderr if false is returned.
 */
-bool Pipeline_add(Pipeline* this, Function f);
+bool Pipeline_add(Pipeline*, Function);
 
 /*
 * Executes the specified pipeline.
 * Will halt execution and print to stderr if soemthing goes wrong, or pipeline is null.
 */
-void Pipeline_execute(Pipeline* this);
+void Pipeline_execute(Pipeline*);
 
 
 /*
 * Frees memory associated with the pipeline.
 * Will print to stderr if pipeline is null.
 */
-void Pipeline_free(Pipeline* this);
+void Pipeline_free(Pipeline*);
 
 #endif /* PIPELINE_H_ */
