@@ -34,17 +34,32 @@
 })
 
 // used to exit from the parent process in recurse_pipeline
-#define exit_recurse(msg) ({        \
-    if (errno != 0) perror(msg);    \
-    return;                         \
+#define exit_recurse(msg) ({                \
+    if (errno != 0) perror(msg);            \
+    else fprintf(stderr, "%s\n", msg);      \
+    raise(FAIL_SIG);                        \
+    return;                                 \
 })
 
 // used to exit from the main process before we start the recursion
-#define exit_main(msg) ({           \
-    if (errno != 0) perror(msg);    \
-    else fprintf(stderr, msg);      \
-    goto end;                       \
+#define exit_main(msg) ({                   \
+    if (errno != 0) perror(msg);            \
+    else fprintf(stderr, "%s\n", msg);      \
+    goto end;                               \
 })
+
+typedef struct FDNode {
+    struct FDNode* next;
+    int p1_input;
+    int p1_output;
+    int p2_input;
+    int p2_output;
+} FDNode;
+
+typedef struct FDList {
+    FDNode* start_node;
+    FDNode* end_node;
+} FDList;
 
 typedef struct FunctionNode {
     struct FunctionNode* next;
@@ -71,9 +86,49 @@ sem_t pnum_sem;  // used to count the child processes
 #define PRINT_SEM "/print_sem" 
 #define PAUSE_SEM "/pause_sem" 
 
-static void cleanup() {
-    sem_unlink(PRINT_SEM);
-    sem_unlink(PAUSE_SEM);
+static bool FDList_add(FDList* list, int p1_input, int p1_output, int p2_input, int p2_output) {
+    if (list == NULL) return false;
+
+    // create node
+    FDNode* node = (FDNode*)malloc(sizeof(FDNode));
+    if (node == NULL) return false;
+    node->p1_input = p1_input;
+    node->p1_output = p1_output;
+    node->p2_input = p2_input;
+    node->p2_output = p2_output;
+    node->next = NULL;
+
+    // append node
+    if (list->start_node == NULL) {
+        list->start_node = node;
+        list->end_node = node;
+    // something has gone wrong
+    } else if (list->end_node == NULL) { 
+        return false;
+    } else {
+        list->end_node->next = node;
+        list->end_node = node;
+    }
+
+    return true;
+}
+
+static void FDList_free(FDList* list) {
+    if (list == NULL) return;
+
+    // frees elements in linked list
+    FDNode* temp;
+    while (list->start_node != NULL) {
+        temp = list->start_node;
+        list->start_node = list->start_node->next;
+        close(temp->p1_input);
+        close(temp->p1_output);
+        close(temp->p2_input);
+        close(temp->p2_output);
+        free(temp);
+    }
+
+    free(list);
 }
 
 // used to print while recursion may be going on
@@ -108,7 +163,7 @@ bool Pipeline_add(Pipeline* p, Function f) {
     if (p->start_node == NULL) {
         p->start_node = node;
         p->end_node = node;
-    // something has gone wrong, likely user has modified end_node
+    // something has gone wrong
     } else if (p->end_node == NULL) { 
         fprintf(stderr, "end_node not set to null\n");
         return false;
@@ -151,9 +206,6 @@ static void child_handler(int sig __attribute__((unused))) {
         }
         sem_trywait(&pnum_sem);
     }
-
-    // err(close(p1[1]), 0, "closing output fd");
-    // if (input != -1) err(close(input), 0, "closing input fd");
     
     // if last child terminated (or we fail to get a value), raise recurse exit
     int pnum_val;
@@ -164,7 +216,7 @@ static void child_handler(int sig __attribute__((unused))) {
     }
 }
 
-static void recurse_pipeline(FunctionNode* node, int input) {
+static void recurse_pipeline(FunctionNode* node, int input, FDList* list) {
     if (node == NULL) return;
 
     // is execution paused?
@@ -177,6 +229,8 @@ static void recurse_pipeline(FunctionNode* node, int input) {
 
     if (pipe(p1) < 0) exit_recurse("pipe p1");
     if (pipe(p2) < 0) exit_recurse("pipe p2");
+    if (!FDList_add(list, p1[0], p1[1], p2[0], p2[1]))
+        exit_recurse("FDList_add");
 
     // establishes signal handler which is called when SIGCHLD is recieved, and calls childhandler
     struct sigaction act;
@@ -211,11 +265,13 @@ static void recurse_pipeline(FunctionNode* node, int input) {
         // runs function stored in node
         node->f(p2[0], p2[1]); // may exit
 
+        sem_close(child_pause_sem);
+        sem_close(child_print_sem);
         exit(EXIT_SUCCESS);
 
     // fork() > 0, then we are in the parent process
     // since we don't wait on the child process to finish, this runs immediately
-    } else recurse_pipeline(node->next, p1[0]);
+    } else recurse_pipeline(node->next, p1[0], list);
 }
    
 
@@ -225,25 +281,32 @@ void Pipeline_execute(Pipeline* p) {
         return;
     }
 
-    int signum;
+    // declared here to avoid jump issues
+    int signum = 0;
+    FDList* list = NULL;
+    sigset_t sig_set;
+    int sig;
+    
     print_sem = sem_open(PRINT_SEM, O_CREAT, 0644, 1);
     pause_sem = sem_open(PAUSE_SEM, O_CREAT, 0644, 0);
-    if (sem_init(&pnum_sem, 1, p->length) < 0) { // can't close pnum_sem if it failed
-        sem_close(pause_sem);
-        sem_close(print_sem);
-        cleanup();
-        return;
+    if (sem_init(&pnum_sem, 0, p->length) < 0) {
+        perror("sem_init pnum_sem");
+        goto post_end;
     }
 
     // create exit signal, which the program will wait for
-    sigset_t sig_set;
-    int sig;
     if (sigemptyset(&sig_set) < 0) exit_main("sigemptyset");
     if (sigaddset(&sig_set, EXIT_SIG) < 0) exit_main("sigaddset exit_sig");
     if (sigaddset(&sig_set, FAIL_SIG) < 0) exit_main("sigaddset fail_sig");
     if (sigprocmask(SIG_BLOCK, &sig_set, NULL) < 0) exit_main("sigprocmask");
 
-    recurse_pipeline(p->start_node, -1); // start pipeline execution
+    // creates linked list to store file descriptors
+    list = (FDList*)malloc(sizeof(FDList));
+    if (list == NULL) exit_main("malloc fdlist");
+    list->start_node = NULL;
+    list->end_node = NULL;
+
+    recurse_pipeline(p->start_node, -1, list); // start pipeline execution
 
     // wait on all processes to finish, or for the exit signal
     signum = sigwait(&sig_set, &sig);
@@ -253,12 +316,14 @@ void Pipeline_execute(Pipeline* p) {
         fprintf(stderr, "sigwait failed\n");
         kill(1, SIGTERM); // kills all children, just to make sure
     }
-    
     end:
         sem_close(&pnum_sem);
+    post_end:
         sem_close(pause_sem);
         sem_close(print_sem);
-        cleanup();
+        sem_unlink(PRINT_SEM);
+        sem_unlink(PAUSE_SEM);
+        FDList_free(list); // close all open pipes
 }
 
 void Pipeline_free(Pipeline* p) {
