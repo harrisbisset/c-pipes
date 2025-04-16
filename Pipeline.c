@@ -14,14 +14,19 @@
 
 #include "Pipeline.h"
 
-// used to check whether an error value is returned from a function inside pipeline execution
-#define catch_perr(result, child, msg) ({           \
-    if (result) {                                   \
-        if (errno != 0) perror(msg);                \
-        if (child) exit(EXIT_FAILURE);              \
-        else return;                                \
-    }                                               \
-})                                                  \
+// used to check whether an error value is returned from a function
+#define catch_perr(result, child, msg) ({                           \
+    if (result) {                                                   \
+        if (errno != 0) perror(msg);                                \
+        if (child) exit(EXIT_FAILURE);                              \
+        else {                                                      \
+            if (errno == 0) fprintf(stderr, "error: %s\n", msg);    \
+            error_code = -1;                                        \
+            raise(FAIL_SIG);                                        \
+            return;                                                 \
+        }                                                           \
+    }                                                               \
+})                                                                  
 
 // used to check whether a value to null, when it shouldn't be
 #define check_null(val, msg, ret) ({                \
@@ -30,13 +35,15 @@
         else fprintf(stderr, "%s\n", msg);          \
         return ret;                                 \
     }                                               \
-})                                                  \
+})                                                  
 
 enum ERR_CODE {
+    Other = -1, // don't print error_code
+    Default = 0, // the default value when not set
     Abnormal = 1, // abnormal termination
-    FunctionFailedInExit, // function set perror, and exited
-    ExitFailure, // function exited not in success
-    FunctionFailedNoExit // function set perorr, and didn't exit
+    FunctionFailedInExit = 2, // function set perror, and exited
+    ExitFailure = 3, // function exited not in success
+    FunctionFailedNoExit = 4 // function set perorr, and didn't exit
 };
 
 typedef struct FunctionNode {
@@ -54,7 +61,7 @@ struct pipeline {
 #define EXIT_SIG SIGUSR1 // finished recursion
 #define FAIL_SIG SIGUSR2 // failed recursion
 
-enum ERR_CODE error_code = 0;
+enum ERR_CODE error_code = Default;
 int session = 0;
 int function_success = 0; // used to check whether a function caused the child process to fail
 sem_t pnum; // used to count the child processes
@@ -68,21 +75,15 @@ static char* str_err(enum ERR_CODE c) {
         return "child process exited in failure";
     } else if (c == FunctionFailedNoExit) {
         return strerror(errno);
+    } else if (c == Other || c == Default) {
+        return "didn't expect to print error_code";
     }
 
-    exit(EXIT_FAILURE);
+    return "err_code not implemented";
 }
 
-Pipeline* new_Pipeline() {
-    Pipeline* p = (Pipeline*)malloc(sizeof(Pipeline));
-    check_null(p, "pipeline not able to be instansiated", NULL);
-    p->start_node = NULL;
-    p->end_node = NULL;
-    return p;
-}
-
-bool Pipeline_add(Pipeline* this, Function f) {
-    check_null(this, "pipeline null", false);
+static bool Pipeline_add(FDList* this, Function f) {
+    check_null(this, "pipeline null", false); 
     check_null(f, "function null", false);
 
     // create node
@@ -109,12 +110,45 @@ bool Pipeline_add(Pipeline* this, Function f) {
     return true;
 }
 
-// executed
+Pipeline* new_Pipeline() {
+    Pipeline* p = (Pipeline*)malloc(sizeof(Pipeline));
+    check_null(p, "pipeline not able to be instansiated", NULL);
+    p->start_node = NULL;
+    p->end_node = NULL;
+    return p;
+}
+
+bool Pipeline_add(Pipeline* this, Function f) {
+    check_null(this, "pipeline null", false); 
+    check_null(f, "function null", false);
+
+    // create node
+    FunctionNode* node = (FunctionNode*)malloc(sizeof(FunctionNode));
+    check_null(node, "pipeline node not able to be instansiated", false);
+    node->f = f;
+    node->next = NULL;
+
+    // append node
+    if (this->start_node == NULL) {
+        this->start_node = node;
+        this->end_node = node;
+    // something has gone wrong, likely user has modified end_node
+    } else if (this->end_node == NULL) { 
+        fprintf(stderr, "end_node not set to null\n");
+        return false;
+    } else {
+        this->end_node->next = node;
+        this->end_node = node;
+    }
+
+    this->length++;
+
+    return true;
+}
+
+// executed when child process exits
 static void child_handler(int sig, siginfo_t *info, void *context) {
     if (sig != SIGCHLD) return;
-
-    // don't check for info not null, since it shouldn't happen
-    // info-> 
 
     while (1) {
         int status;
@@ -137,7 +171,6 @@ static void child_handler(int sig, siginfo_t *info, void *context) {
         }
         sem_trywait(&pnum);
     }
-    
 
     // err(close(p1[1]), 0, "closing output fd");
     // if (input != -1) err(close(input), 0, "closing input fd");
@@ -150,7 +183,6 @@ static void child_handler(int sig, siginfo_t *info, void *context) {
         return;
     }
 }
-
 
 static void recurse_pipeline(FunctionNode* node, int input) {
     if (node == NULL) return;
@@ -219,7 +251,7 @@ void Pipeline_execute(Pipeline* this) {
     // create semaphores to handle shared memory
     catch_perr(sem_init(&pnum, 1, this->length) < 0, false, "pnum semaphore init");
     
-    error_code = 0;
+    error_code = Default;
     recurse_pipeline(this->start_node, -1); // start pipeline execution
 
     // wait on all processes to finish
@@ -228,8 +260,8 @@ void Pipeline_execute(Pipeline* this) {
 
     catch_perr(sem_destroy(&pnum) < 0, false, "failed to destroy pnum semaphore");
     if (signum == FAIL_SIG) {
-        fprintf(stderr, "%s\n", str_err(error_code));
-        kill(1, SIGTERM);
+        if (error_code != Other) fprintf(stderr, "%s\n", str_err(error_code));
+        kill(1, SIGTERM); // kills all children
     };
 }
 
