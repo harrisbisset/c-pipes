@@ -64,6 +64,8 @@ struct pipeline {
 // these are used in the main process, across functions
 sem_t* print_sem; // can we print in a process
 sem_t* pause_sem; // whether we should pause execution
+
+// used across processes
 sem_t pnum_sem;  // used to count the child processes
 
 #define PRINT_SEM "/print_sem" 
