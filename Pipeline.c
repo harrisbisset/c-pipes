@@ -230,7 +230,7 @@ void Pipeline_execute(Pipeline* p) {
     catch_perr(sem_destroy(&pnum) < 0, false, "failed to destroy pnum semaphore");
     if (signum == 0) {
         if (sig == FAIL_SIG) {
-            if (error_code != Other) fprintf(stderr, "%s\n", str_err(error_code));
+            if (error_code > Default) fprintf(stderr, "%s\n", str_err(error_code)); // print erorr, if not default or misc value
             kill(1, SIGTERM); // kills all children
         }
     } else {
