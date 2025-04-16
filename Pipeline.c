@@ -216,7 +216,7 @@ static void child_handler(int sig __attribute__((unused))) {
     }
 }
 
-static void recurse_pipeline(FunctionNode* node, int input, FDList* list) {
+static void recurse_pipeline(FunctionNode* node, int input, FDList* fd_list) {
     if (node == NULL) return;
 
     // is execution paused?
@@ -229,7 +229,7 @@ static void recurse_pipeline(FunctionNode* node, int input, FDList* list) {
 
     if (pipe(p1) < 0) exit_recurse("pipe p1");
     if (pipe(p2) < 0) exit_recurse("pipe p2");
-    if (!FDList_add(list, p1[0], p1[1], p2[0], p2[1]))
+    if (!FDList_add(fd_list, p1[0], p1[1], p2[0], p2[1]))
         exit_recurse("FDList_add");
 
     // establishes signal handler which is called when SIGCHLD is recieved, and calls childhandler
@@ -271,7 +271,7 @@ static void recurse_pipeline(FunctionNode* node, int input, FDList* list) {
 
     // fork() > 0, then we are in the parent process
     // since we don't wait on the child process to finish, this runs immediately
-    } else recurse_pipeline(node->next, p1[0], list);
+    } else recurse_pipeline(node->next, p1[0], fd_list);
 }
    
 
@@ -283,15 +283,16 @@ void Pipeline_execute(Pipeline* p) {
 
     // declared here to avoid jump issues
     int signum = 0;
-    FDList* list = NULL;
     sigset_t sig_set;
     int sig;
+    FDList* fd_list = NULL;
     
+    // insansiate semaphores
     print_sem = sem_open(PRINT_SEM, O_CREAT, 0644, 1);
     pause_sem = sem_open(PAUSE_SEM, O_CREAT, 0644, 0);
     if (sem_init(&pnum_sem, 0, p->length) < 0) {
         perror("sem_init pnum_sem");
-        goto post_end;
+        goto post_end; // since we can't close what we failed to open
     }
 
     // create exit signal, which the program will wait for
@@ -301,12 +302,12 @@ void Pipeline_execute(Pipeline* p) {
     if (sigprocmask(SIG_BLOCK, &sig_set, NULL) < 0) exit_main("sigprocmask");
 
     // creates linked list to store file descriptors
-    list = (FDList*)malloc(sizeof(FDList));
-    if (list == NULL) exit_main("malloc fdlist");
-    list->start_node = NULL;
-    list->end_node = NULL;
+    fd_list = (FDList*)malloc(sizeof(FDList));
+    if (fd_list == NULL) exit_main("malloc fdlist");
+    fd_list->start_node = NULL;
+    fd_list->end_node = NULL;
 
-    recurse_pipeline(p->start_node, -1, list); // start pipeline execution
+    recurse_pipeline(p->start_node, -1, fd_list); // start pipeline execution
 
     // wait on all processes to finish, or for the exit signal
     signum = sigwait(&sig_set, &sig);
@@ -323,7 +324,7 @@ void Pipeline_execute(Pipeline* p) {
         sem_close(print_sem);
         sem_unlink(PRINT_SEM);
         sem_unlink(PAUSE_SEM);
-        FDList_free(list); // close all open pipes
+        FDList_free(fd_list); // close all open pipes
 }
 
 void Pipeline_free(Pipeline* p) {
