@@ -11,8 +11,9 @@
 #include <errno.h>
 #include <sys/wait.h>
 #include <signal.h>
-#include <semaphore.h>
+#include <pthread.h> 
 #include <fcntl.h>
+#include <semaphore.h>
 
 #include "Pipeline.h"
 
@@ -25,21 +26,20 @@
     }                                               \
 })                                                  
 
-// used to exit from child processes
-#define exit_child(msg) ({                          \
-    process_print(child_print_sem, msg);            \
-    sem_close(child_pause_sem);                     \
-    sem_close(child_print_sem);                     \
-    sem_unlink(PAUSE_SEM);                          \
-    sem_unlink(PRINT_SEM);                          \
-    exit(EXIT_FAILURE);                             \
+// used to exit from threads
+#define exit_thread(msg) ({                         \
+    process_print(msg);                             \
+    sem_close(success_sem);                         \
+    raise(SIGKILL);                                 \
+    return NULL;                                    \
 })
 
 // used to exit from the parent process in recurse_pipeline
 #define exit_recurse(msg) ({                \
     if (errno != 0) perror(msg);            \
     else fprintf(stderr, "%s\n", msg);      \
-    raise(FAIL_SIG);                        \
+    sem_close(success_sem);                 \
+    raise(SIGKILL);                         \
     return;                                 \
 })
 
@@ -49,6 +49,22 @@
     else fprintf(stderr, "%s\n", msg);      \
     goto end;                               \
 })
+
+// used to exit from the container parent process if the child fails
+#define exit_container_parent(msg) ({       \
+    fprintf(stderr, "%s\n", msg);           \
+    sem_close(success_sem);                 \
+    kill(getppid(), FAIL_SIG);              \
+    return;                                 \
+})
+
+typedef struct thread_struct {
+    Function f;
+    sem_t* sucess_sem;
+    int input;
+    int p1[2];
+    int p2[2];
+} thread_struct;
 
 typedef struct FDNode {
     struct FDNode* next;
@@ -75,18 +91,18 @@ struct pipeline {
 };
 
 // SIGUSR1 and SIGUSR2 are used as a misc signals for developers
-#define EXIT_SIG SIGUSR1 // finished recursion
-#define FAIL_SIG SIGUSR2 // failed recursion
+#define FAIL_SIG SIGUSR1 // failed recursion
+#define EXIT_SIG SIGUSR2 // exited recursion
 
-// these are used in the main process, across functions
-sem_t* print_sem; // can we print in a process
-sem_t* pause_sem; // whether we should pause execution
+#define max_threads 6
 
-// used across processes
-sem_t pnum_sem;  // used to count the child processes
+pthread_mutex_t pause_lock;
+bool pause_exe;
 
-#define PRINT_SEM "/print_sem" 
-#define PAUSE_SEM "/pause_sem" 
+pthread_mutex_t fd_list_lock;
+FDList* fd_list;
+
+#define SUCCESS_SEM "/success_sem"
 
 static bool FDList_add(FDList* list, int p1_input, int p1_output, int p2_input, int p2_output) {
     if (list == NULL) return false;
@@ -134,12 +150,9 @@ static void FDList_free(FDList* list) {
 }
 
 // used to print while recursion may be going on
-static void process_print(sem_t* print_sem, const char* msg) {
-    if (sem_wait(print_sem) == 0) {
-        if (errno != 0) perror("");
-        fprintf(stderr, "process: %d, erorr: %s\n", getpid(), msg);
-        sem_post(print_sem);
-    }
+static void process_print(const char* msg) {
+    if (errno != 0) perror("");
+    fprintf(stderr, "process: %d, erorr: %s\n", getpid(), msg);
 }
 
 Pipeline* new_Pipeline() {
@@ -179,103 +192,75 @@ bool Pipeline_add(Pipeline* p, Function f) {
     return true;
 }
 
-// executed when child process exits
-static void child_handler(int sig __attribute__((unused))) {
-
-    sem_t* print_sem = sem_open(PRINT_SEM, 0);
-    sem_t* pause_sem = sem_open(PAUSE_SEM, 0);
-
-    // gets all hanging children
-    while (1) {
-        int status;
-        pid_t pid = waitpid(-1, &status, WNOHANG);
-        if (pid <= 0) {
-            break;
-        }
-        // if process exited with exit() or _exit
-        if (!WIFEXITED(status)) {
-            process_print(print_sem, "child process exited abnormally");
-            sem_post(pause_sem);
-            raise(FAIL_SIG);
-            return;
-        }
-        // if child process exited in failure
-        if (WEXITSTATUS(status) != EXIT_SUCCESS) {
-            process_print(print_sem, "child process exited in failure");
-            sem_post(pause_sem);
-            raise(FAIL_SIG);
-            return;
-        }
-        sem_trywait(&pnum_sem);
+static void* child(void* arg) {
+    struct thread_struct* args = (thread_struct*) arg;
+    if (args == NULL) {
+        process_print("args null");
+        raise(SIGKILL);
+        return NULL;
     }
+    sem_t* success_sem = args->sucess_sem;
     
-    // if last child terminated (or we fail to get a value), raise recurse exit
-    int pnum_val;
-    if (sem_getvalue(&pnum_sem, &pnum_val) < 0 || pnum_val <= 0) {
-        sem_post(pause_sem); // if we fail to get a value, there may be more child processes, so we should stop more from spawning
-        raise(EXIT_SIG);
-        return;
-    }
+    // copies input to p2[0]
+    if (args->input != -1 && dup2(args->input, args->p2[0]) < 0)
+        exit_thread("failed to copy to input pipe");
+
+    // copies p1[1] to p2[1]
+    if (dup2(args->p1[1], args->p2[1]) < 0)
+        exit_thread("failed to copy to output pipe");
+
+    // runs function stored in node
+    args->f(args->p2[0], args->p2[1]); // may exit
+
+    pthread_mutex_lock(&fd_list_lock);
+    if (close(args->p1[1]) < 0) exit_thread("closing output fd");
+    if (args->input != -1 && close(args->input) < 0) exit_thread("closing input fd");
+    pthread_mutex_unlock(&fd_list_lock);
+
+    return NULL;
 }
 
-static void recurse_pipeline(FunctionNode* node, int input, FDList* fd_list) {
+static void recurse_pipeline(sem_t* success_sem, pthread_t tid[], int count, FunctionNode* node, int input) {
     if (node == NULL) return;
 
     // is execution paused?
-    int pause_execution;
-    if (sem_getvalue(pause_sem, &pause_execution) < 0 || pause_execution)
-        exit_recurse("sem_getvalue pause_sem");
+    pthread_mutex_lock(&pause_lock);
+    if (pause_exe) {
+        fprintf(stderr, "execution paused\n");
+        pthread_mutex_unlock(&pause_lock);
+        raise(SIGKILL);
+        return;
+    }
+    pthread_mutex_unlock(&pause_lock);
 
     int p1[2];
     int p2[2];
-
     if (pipe(p1) < 0) exit_recurse("pipe p1");
     if (pipe(p2) < 0) exit_recurse("pipe p2");
-    if (!FDList_add(fd_list, p1[0], p1[1], p2[0], p2[1]))
+
+    // adds file descriptors to mutex
+    pthread_mutex_lock(&fd_list_lock);
+    if (!FDList_add(fd_list, p1[0], p1[1], p2[0], p2[1])) {
+        pthread_mutex_unlock(&fd_list_lock);
         exit_recurse("FDList_add");
+    }
+    pthread_mutex_unlock(&fd_list_lock);
 
-    // establishes signal handler which is called when SIGCHLD is recieved, and calls childhandler
-    struct sigaction act;
-    act.sa_flags = SA_SIGINFO;
-    act.sa_handler = &child_handler;
-    if (sigaction(SIGCHLD, &act, NULL) < 0)
-        exit_recurse("sigaction");
+    // list of args to pass into thread
+    struct thread_struct* arg = (thread_struct*)malloc(sizeof(struct thread_struct));
+    arg->f = node->f;
+    arg->input = input;
+    arg->sucess_sem = success_sem;
+    arg->p1[0] = p1[0];
+    arg->p1[1] = p1[1];
+    arg->p2[0] = p2[0];
+    arg->p2[1] = p2[1];
 
-    // forks process
-    pid_t pid = fork();
-    if (pid < 0) exit_recurse("fork");
+    // creates new thread
+    if (pthread_create(&tid[count], NULL, &child, arg) != 0) exit_recurse("pthread_create");
 
-    // if fork() == 0, then we are in the child process
-    if (pid == 0) {
-
-        // opens semaphores in child process
-        sem_t* child_print_sem = sem_open(PRINT_SEM, 0);
-        sem_t* child_pause_sem = sem_open(PAUSE_SEM, 0);
-
-        // unused, since we take the last input as the input pipe
-        if (close(p1[0]) < 0)
-            exit_child("execution stopped");
-        
-        // copies input to p2[0]
-        if (input != -1 && dup2(input, p2[0]) < 0)
-            exit_child("failed to copy to input pipe");
-
-        // copies p1[1] to p2[1]
-        if (dup2(p1[1], p2[1]) < 0)
-            exit_child("failed to copy to output pipe");
-
-        // runs function stored in node
-        node->f(p2[0], p2[1]); // may exit
-
-        sem_close(child_pause_sem);
-        sem_close(child_print_sem);
-        exit(EXIT_SUCCESS);
-
-    // fork() > 0, then we are in the parent process
-    // since we don't wait on the child process to finish, this runs immediately
-    } else recurse_pipeline(node->next, p1[0], fd_list);
+    recurse_pipeline(success_sem, tid, count++, node->next, p1[0]);
 }
-   
 
 void Pipeline_execute(Pipeline* p) {
     if (p == NULL) {
@@ -283,24 +268,25 @@ void Pipeline_execute(Pipeline* p) {
         return;
     }
 
-    // declared here to avoid jump issues
+    // vars declared here to avoid jump issues
+    pthread_t tid[p->length];
+
+    // for signals
     int signum = 0;
     sigset_t sig_set;
     int sig;
-    FDList* fd_list = NULL;
-    
-    // insansiate semaphores
-    print_sem = sem_open(PRINT_SEM, O_CREAT, 0644, 1);
-    pause_sem = sem_open(PAUSE_SEM, O_CREAT, 0644, 0);
-    if (sem_init(&pnum_sem, 0, p->length) < 0) {
-        perror("sem_init pnum_sem");
-        goto post_end; // since we can't close what we failed to open
-    }
 
-    // create exit signal, which the program will wait for
+    // process pids
+    pid_t main_pid;
+    pid_t container_pid;
+
+    if (pthread_mutex_init(&pause_lock, NULL) < 0) exit_main("pause_lock");
+    if (pthread_mutex_init(&fd_list_lock, NULL) < 0) exit_main("fd_list_lock");
+
+    // create failure signal, which the program will wait for
     if (sigemptyset(&sig_set) < 0) exit_main("sigemptyset");
-    if (sigaddset(&sig_set, EXIT_SIG) < 0) exit_main("sigaddset exit_sig");
     if (sigaddset(&sig_set, FAIL_SIG) < 0) exit_main("sigaddset fail_sig");
+    if (sigaddset(&sig_set, EXIT_SIG) < 0) exit_main("sigaddset sigkill");
     if (sigprocmask(SIG_BLOCK, &sig_set, NULL) < 0) exit_main("sigprocmask");
 
     // creates linked list to store file descriptors
@@ -309,24 +295,75 @@ void Pipeline_execute(Pipeline* p) {
     fd_list->start_node = NULL;
     fd_list->end_node = NULL;
 
-    recurse_pipeline(p->start_node, -1, fd_list); // start pipeline execution
+    main_pid = fork();
+    if (main_pid < 0) exit_main("main fork");
+    else if (main_pid == 0) {
+        
+        /* 
+        * semamphore used to determine whether the container process (process which handles all threads) and all threads were successful
+        * 1 is the success state
+        * 0 is the failure state
+        */ 
+        sem_t* success_sem = sem_open(SUCCESS_SEM, O_CREAT, 0644, 0);
 
-    // wait on all processes to finish, or for the exit signal
-    signum = sigwait(&sig_set, &sig);
-    if (signum == 0) {
-        if (sig == FAIL_SIG) kill(1, SIGTERM); // kills all children
+        container_pid = fork();
+        if (container_pid < 0) {
+            process_print("container fork");
+            raise(SIGKILL);
+            return;
+        }
+
+        if (container_pid == 0) {
+            sem_t* child_success_sem = sem_open(SUCCESS_SEM, 0);
+
+            recurse_pipeline(child_success_sem, tid, 0, p->start_node, -1); // start pipeline execution
+
+            // wait for running threads to terminate
+            for (int i = 0; i < p->length; i++) {
+                pthread_join(tid[i], NULL); 
+            }
+            
+            sem_post(child_success_sem);
+            sem_close(child_success_sem);
+            exit(EXIT_SUCCESS);
+            
+        } else {
+
+            // wait for child to finish
+            int status;
+            int pid = wait(&status);
+            if (pid < 0) exit_container_parent("wait");
+
+            // if process didn't exit with exit() or _exit
+            if (!WIFEXITED(status)) exit_container_parent("child process exited abnormally");
+
+            // if child process exited in failure            
+            int success;
+            if (sem_getvalue(success_sem, &success) < 0 || success != 1 || WEXITSTATUS(status) != EXIT_SUCCESS)
+                exit_container_parent("container child failed");
+
+            // exited successfully
+            sem_close(success_sem);
+            kill(getppid(), EXIT_SIG);
+            return;
+        }
+
     } else {
-        fprintf(stderr, "sigwait failed\n");
-        kill(1, SIGTERM); // kills all children, just to make sure
+
+        // wait on all processes to finish, or for the exit signal
+        signum = sigwait(&sig_set, &sig);
+        if (signum == 0) {
+            if (sig == FAIL_SIG) fprintf(stderr, "process failed\n");
+        } else {
+            fprintf(stderr, "sigwait failed\n");
+            kill(1, SIGTERM); // kills all children, just to make sure
+        }
+
+        end:
+            pthread_mutex_destroy(&pause_lock);
+            pthread_mutex_destroy(&fd_list_lock);
+            FDList_free(fd_list); // close all open pipes
     }
-    end:
-        sem_close(&pnum_sem);
-    post_end:
-        sem_close(pause_sem);
-        sem_close(print_sem);
-        sem_unlink(PRINT_SEM);
-        sem_unlink(PAUSE_SEM);
-        FDList_free(fd_list); // close all open pipes
 }
 
 void Pipeline_free(Pipeline* p) {

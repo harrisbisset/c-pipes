@@ -9,7 +9,9 @@ run: clean SievePipeline SumSquaresPipeline start
 
 start:
 	- killall -s 9 SievePipeline
-	./SievePipeline < sieve1.in
+	./SievePipeline < sieve2.in
+	# - killall -s 9 SumSquaresPipeline
+	# ./SumSquaresPipeline < squares.in
 
 
 all: SumSquaresPipeline SievePipeline
@@ -34,3 +36,9 @@ Pipeline.o: Pipeline.c Pipeline.h
 
 clean:
 	$(RM) SumSquaresPipeline SievePipeline *.o
+
+test: test.o
+	$(CC) $(LFLAGS) test.o -o test
+
+test.o: test.c
+	$(CC) $(CFLAGS) test.c
