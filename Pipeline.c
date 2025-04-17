@@ -3,6 +3,8 @@
 *
 */
 
+#define _XOPEN_SOURCE 700
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -241,7 +243,7 @@ static void recurse_pipeline(FunctionNode* node, int input, FDList* fd_list) {
 
     // forks process
     pid_t pid = fork();
-    if (pid < 0) exit_recurse("fork");;
+    if (pid < 0) exit_recurse("fork");
 
     // if fork() == 0, then we are in the child process
     if (pid == 0) {
