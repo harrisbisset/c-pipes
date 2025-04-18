@@ -15,6 +15,7 @@
 void Pipeline_setDebug(Pipeline* p, int debug);
 
 // used to get the exit code from the pipeline
+// -3 is for not executed yet
 // -2 is for NULL
 // -1 is for failure
 // 0 is for success

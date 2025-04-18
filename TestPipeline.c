@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <sys/wait.h>
+#include <pthread.h>
 
 #define DEBUG 0
 
@@ -23,6 +24,12 @@
     int result = Pipeline_exitCode(p);                  \
     Pipeline_free(p);                                   \
     return result == expected;                          \
+})
+
+#define add_pipeline_multi(max, f) ({                   \
+    for (int i = 0; i < max; i++) {                     \
+        add_pipeline(f);                                \
+    }                                                   \
 })
 
 // used to help debug
@@ -96,47 +103,26 @@ static int function_exit_failure() {
 
 static int function_success_multi() {
     create_pipeline();
-    add_pipeline(success);
-    add_pipeline(success);
-    add_pipeline(success);
-    add_pipeline(success);
-    add_pipeline(success);
-    add_pipeline(success);
-    add_pipeline(success);
-    add_pipeline(success);
-    add_pipeline(success);
-    add_pipeline(success);
-    add_pipeline(success);
-    add_pipeline(success);
+    add_pipeline_multi(100, success);
     execute_return(0);
 }
 
 static int function_exit_success_multi() {
     create_pipeline();
-    add_pipeline(exit_success);
-    add_pipeline(exit_success);
-    add_pipeline(exit_success);
-    add_pipeline(exit_success);
-    add_pipeline(exit_success);
-    add_pipeline(exit_success);
+    add_pipeline_multi(10, exit_success);
     execute_return(-1);
 }
 
 static int function_exit_failure_multi() {
     create_pipeline();
-    add_pipeline(exit_fail);
-    add_pipeline(exit_fail);
-    add_pipeline(exit_fail);
+    add_pipeline_multi(10, exit_fail);
     execute_return(-1);
 }
 
 static int function_multiply() {
     create_pipeline();
     add_pipeline(generate);
-    add_pipeline(multiply);
-    add_pipeline(multiply);
-    add_pipeline(multiply);
-    add_pipeline(multiply);
+    add_pipeline_multi(40, multiply);
     execute_return(0);
 }
 
@@ -170,9 +156,7 @@ static void sieveInts(int input, int output) {
 static int sieve_ints() {
     create_pipeline();
     add_pipeline(generateInts);
-    for (int i = 0; i < 1000; i++) {
-        add_pipeline(sieveInts);
-    }
+    add_pipeline_multi(1000, sieveInts);
     execute_return(0);
 }
 
@@ -186,7 +170,7 @@ static void generateIntsSum(int input, int output) {
  
 static void squareInts(int input, int output) {
     if (DEBUG) printf("squareInts: process %i, parent %i\n", getpid(), getppid());
-    for (int i = 1; i <= 100; i++) {
+    for (int i = 1; i <= 1000; i++) {
         int number;
         read(input, &number, sizeof(int));
         int result = number * number;
@@ -218,22 +202,37 @@ static int sum_squares() {
 static void pipeline_multiply(int input, int output) {
     create_pipeline();
     add_pipeline(generate);
-    add_pipeline(multiply);
-    add_pipeline(multiply);
-    add_pipeline(multiply);
-    add_pipeline(multiply);
+    add_pipeline_multi(5, multiply);
+    Pipeline_execute(p);
     int result = Pipeline_exitCode(p);
     Pipeline_free(p);
     assert(result == 0);
+    return;
 }
 
 static int function_pipeline_pipeline() {
     create_pipeline();
-    add_pipeline(pipeline_multiply);
-    add_pipeline(pipeline_multiply);
-    add_pipeline(pipeline_multiply);
-    add_pipeline(pipeline_multiply);
-    add_pipeline(pipeline_multiply);
+    add_pipeline_multi(10, pipeline_multiply);
+    execute_return(0);
+}
+
+static void pipeline_early_exit(int input, int output) {
+    close(input);
+    close(output);
+    pthread_exit(0);
+    printf("shouldn't be seen\n"); // never printed
+    return;
+}
+
+
+static int function_thread_fail() {
+    create_pipeline();
+    add_pipeline(pipeline_early_exit); // thread terminates early, but doesn't hang process
+    add_pipeline(generate);
+    add_pipeline(multiply);
+    // add_pipeline(pipeline_early_exit); !!!! if the function were placed here, the program would hang
+    add_pipeline(multiply);
+    add_pipeline(multiply);
     execute_return(0);
 }
 
@@ -251,6 +250,8 @@ int main() {
 
     assert(sieve_ints());
     assert(sum_squares());
+
+    assert(function_thread_fail()); // example case edge case
 
     assert(function_pipeline_pipeline()); // pipeline the pipelines
 

@@ -28,7 +28,8 @@ bool Pipeline_add(Pipeline* p, Function func);
 * Executes the specified pipeline.
 * Will halt execution if something goes wrong, or pipeline is null.
 * Halted execution may mean that some processes will continue, since they were started before execution is halted.
-* Sets exit code to -1 if error.
+* Sets exit code to -1 if error and 0 for success.
+* WARNING: Will not handle a function explictly ending the current thread early as a failure!
 */
 void Pipeline_execute(Pipeline* p);
 

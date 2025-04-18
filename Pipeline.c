@@ -59,18 +59,6 @@
     goto end;                               \
 })
 
-// used to exit from the container parent process if the child fails
-#define exit_container_parent(msg) ({                                                       \
-    int exit_perror = errno;                                                                \
-    if (sem_close(exit_sem) < 0) if (debug) perror("close exit_sem");                       \
-    if (sem_unlink(exit_sem_name) < 0) if (debug) perror("close exit_sem");                 \
-    if (debug && exit_perror != 0)                                                          \
-        fprintf(stderr, "process: %i, %s: %s\n", getpid(), msg, strerror(exit_perror));     \
-    else if (debug) fprintf(stderr, "process: %i, %s\n", getpid(), msg);                    \
-    exit(EXIT_FAILURE);                                                                     \
-    return;                                                                                 \
-})
-
 typedef struct thread_struct {
     Function f;
     int debug;
@@ -122,7 +110,7 @@ Pipeline* new_Pipeline() {
     p->end_node = NULL;
     p->length = 0;
     p->debug = 0;
-    p->exit_code = 0;
+    p->exit_code = -3; // if the exit_code were to be checked before running, it would be a user error, but it's set to -3 nevertheless
     return p;
 }
 
@@ -159,11 +147,12 @@ static void* child(void* arg) {
         exit(EXIT_FAILURE);
         return NULL;
     }
-    int debug = args->debug;
+    int debug = args->debug; // for consistency accross macros
 
     if (debug) fprintf(stderr, "starting thread: %lu\n", pthread_self());
 
-    // these should always be valid file descriptors    
+    // these should always be valid file descriptors
+    // not super necessary, but it's nice to handle edge cases
     if (fcntl(args->p1[1], F_GETFD) < 0) exit_thread("p1[1] not a valid fd");
     if (fcntl(args->p2[0], F_GETFD) < 0) exit_thread("p2[0] not a valid fd");
     if (fcntl(args->p2[1], F_GETFD) < 0) exit_thread("p1[1] not a valid fd");
@@ -180,10 +169,8 @@ static void* child(void* arg) {
     // runs function stored in node
     args->f(args->p2[0], args->p2[1]); // may exit
 
-    pthread_mutex_lock(&fd_list_lock);
     if (close(args->p1[1]) < 0) exit_thread("closing output fd");
     if (args->input != -1 && close(args->input) < 0) exit_thread("closing input fd");
-    pthread_mutex_unlock(&fd_list_lock);
 
     if (debug) fprintf(stderr, "exiting thread: %lu\n", pthread_self());
     
@@ -282,13 +269,13 @@ void Pipeline_execute(Pipeline* p) {
     if (p == NULL) return;
     p->exit_code = -1; // sudden exit means failure now
 
-    int debug = p->debug;
+    int debug = p->debug; // for consistency accross macros
 
     // vars declared here to avoid jump issues
     pthread_t tid[p->length];
+    sem_t* exit_sem;
 
     // process pids
-    pid_t main_pid;
     pid_t container_pid;
 
     // dynamic name, as pipeline may spawn pipeline children which use the same name
@@ -308,99 +295,70 @@ void Pipeline_execute(Pipeline* p) {
     fd_list->start_node = NULL;
     fd_list->end_node = NULL;
 
-    main_pid = fork();
-    if (main_pid < 0) exit_main("main fork");
+    if (debug) fprintf(stderr, "parent: %d, main child: %d\n", getppid(), getpid());
 
-    // main child process
-    else if (main_pid == 0) {
-        if (debug) fprintf(stderr, "parent: %d, main child: %d\n", getppid(), getpid());
+    exit_sem = sem_open(exit_sem_name, O_CREAT, 0644, 0);
 
-        sem_t* exit_sem = sem_open(exit_sem_name, O_CREAT, 0644, 0);
+    container_pid = fork();
+    if (container_pid < 0) exit_main("container fork");
+    else if (container_pid == 0) { // container child process
 
-        container_pid = fork();
-        if (container_pid < 0) {
-            process_print("container fork");
-            exit(EXIT_FAILURE);
-            return;
+        if (debug) fprintf(stderr, "parent: %d, container child: %d\n", getppid(), getpid());
+        recurse_pipeline(tid, 0, debug, p->start_node, -1); // start pipeline execution
+
+        // wait for running threads to terminate
+        for (int i = 0; i < p->length; i++) {
+            if (debug) fprintf(stderr, "parent %i: waiting on %dth thread\n", getppid(), i);
+            if (pthread_join(tid[i], NULL) != 0 && debug) fprintf(stderr, "terminated on %dth thread\n", i);
         }
 
-        // container child process
-        if (container_pid == 0) {
+        // update success
+        sem_t* child_exit_sem = sem_open(exit_sem_name, 0);
+        if (child_exit_sem == SEM_FAILED) exit_recurse("sem_open child_exit_sem");
+        if (sem_post(child_exit_sem) < 0) exit_recurse("sem_post child_exit_sem");
+        if (sem_close(child_exit_sem) < 0) exit_recurse("sem_close child_exit_sem");
 
-            if (debug) fprintf(stderr, "parent: %d, container child: %d\n", getppid(), getpid());
-            recurse_pipeline(tid, 0, debug, p->start_node, -1); // start pipeline execution
-
-            // wait for running threads to terminate
-            for (int i = 0; i < p->length; i++) {
-                if (debug) fprintf(stderr, "parent %i: waiting on %dth thread\n", getppid(), i);
-                if (pthread_join(tid[i], NULL) != 0) {
-                    if (debug) fprintf(stderr, "terminated on %dth thread\n", i);
-                }
-            }
-
-            // update success
-            sem_t* child_exit_sem = sem_open(exit_sem_name, 0);
-            sem_post(child_exit_sem);
-            sem_close(child_exit_sem);
-
-            exit(EXIT_SUCCESS);
-            return;
-            
-        // container parent process
-        } else {
-            // wait for child to finish
-            int status;
-            int np = waitpid(container_pid, &status, 0);
-            if (np < 0) exit_container_parent("waitpid failed");
-
-            if (debug) fprintf(stderr, "parent: %d, container parent: %d\n", getppid(), getpid());
-
-            // if process didn't exit with exit() or _exit
-            if (!WIFEXITED(status))
-                exit_container_parent("container child exited abnormally");
-            
-            // check if terminated correctly
-            int exit_status;
-            if (sem_getvalue(exit_sem, &exit_status) < 0)
-                exit_container_parent("failed reading exit_sem");
-            
-
-            // if child process exited in failure
-            if (WEXITSTATUS(status) != EXIT_SUCCESS || exit_status != 1)
-                exit_container_parent("container child failed");
-
-            sem_close(exit_sem);
-            sem_unlink(exit_sem_name);
-            exit(EXIT_SUCCESS);
-            return;
-        }
-
-    // main parent process
+        exit(EXIT_SUCCESS);
+        return;
+        
     } else {
+
         // wait for child to finish
         int status;
-        if (waitpid(main_pid, &status, 0) < 0) exit_main("wait");
-        if (debug) fprintf(stderr, "parent: %d, main parent: %d\n", getppid(), getpid());
+        int np = waitpid(container_pid, &status, 0);
+        if (np < 0) exit_main("waitpid failed");
+
+        if (debug) fprintf(stderr, "parent: %d, container parent: %d\n", getppid(), getpid());
 
         // if process didn't exit with exit() or _exit
-        if (!WIFEXITED(status)) exit_main("container process exited abnormally");
+        if (!WIFEXITED(status))
+            exit_main("container child exited abnormally");
+        
+        // check if terminated correctly
+        int exit_status;
+        if (sem_getvalue(exit_sem, &exit_status) < 0)
+            exit_main("failed reading exit_sem");
+        
 
         // if child process exited in failure
-        if (WEXITSTATUS(status) != EXIT_SUCCESS) exit_main("container parent failed");
-        
+        if (WEXITSTATUS(status) != EXIT_SUCCESS || exit_status != 1)
+            exit_main("container child failed");
+
         p->exit_code = 0; // success
 
         end:
             sem_unlink(exit_sem_name); // just to make sure unlinked
             free(exit_sem_name);
 
+            // close all pipe
+            // don't have to worry about calling close on no longer valid fds, as it doesn't do anything
             pthread_mutex_lock(&fd_list_lock);
-            FDList_free(fd_list); // close all open pipes
+            FDList_free(fd_list); 
             pthread_mutex_unlock(&fd_list_lock);
 
             pthread_mutex_destroy(&pause_lock);
             pthread_mutex_destroy(&fd_list_lock);
-        
+
         return;
     }
 }
