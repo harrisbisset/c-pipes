@@ -37,6 +37,7 @@
 *.hex
 SievePipeline
 SumSquaresPipeline
+TestPipeline
 
 # Debug files
 *.dSYM/

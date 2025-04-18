@@ -1,0 +1,18 @@
+{
+    "files.associations": {
+        "array": "c",
+        "string_view": "c",
+        "type_traits": "c",
+        "pipeline.h": "c",
+        "stdlib.h": "c",
+        "random": "c",
+        "deque": "c",
+        "string": "c",
+        "unordered_map": "c",
+        "vector": "c",
+        "initializer_list": "c",
+        "semaphore.h": "c",
+        "functional": "c",
+        "unistd.h": "c"
+    }
+}
