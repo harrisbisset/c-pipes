@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <limits.h>
 #include <sys/wait.h>
 #include <pthread.h>
 
@@ -69,14 +70,19 @@ static void generate(int input, int output) {
     write(output, &i, sizeof(int));
 }
 
-// multiplies each number it gets by incrmenting values, starting from 2
+// Multiplies by incrementing values, starting from 2, saturating at int limits.
 static void multiply(int input, int output) {
     int number = 0, i = 1;
     while (1) {
         i++;
         read(input, &number, sizeof(int));
         if (number == -1) break;
-        number = number * i;
+        if (number > INT_MAX / i)
+            number = INT_MAX;
+        else if (number < INT_MIN / i)
+            number = INT_MIN;
+        else
+            number *= i;
         write(output, &number, sizeof(int));
     }
     i = -1;
