@@ -66,19 +66,6 @@ typedef struct thread_struct {
     int p2[2];
 } thread_struct;
 
-typedef struct FDNode {
-    struct FDNode* next;
-    int p1_input;
-    int p1_output;
-    int p2_input;
-    int p2_output;
-} FDNode;
-
-typedef struct FDList {
-    FDNode* start_node;
-    FDNode* end_node;
-} FDList;
-
 typedef struct FunctionNode {
     struct FunctionNode* next;
     Function f;
@@ -96,9 +83,6 @@ struct pipeline {
 
 pthread_mutex_t pause_lock;
 bool pause_exe;
-
-pthread_mutex_t fd_list_lock;
-FDList* fd_list = NULL;
 
 static long pipeline_counter;
 
@@ -177,51 +161,6 @@ static void* child(void* arg) {
     return NULL;
 }
 
-static bool FDList_add(FDList* list, int p1_input, int p1_output, int p2_input, int p2_output) {
-    if (list == NULL) return false;
-
-    // create node
-    FDNode* node = (FDNode*)malloc(sizeof(FDNode));
-    if (node == NULL) return false;
-    node->p1_input = p1_input;
-    node->p1_output = p1_output;
-    node->p2_input = p2_input;
-    node->p2_output = p2_output;
-    node->next = NULL;
-
-    // append node
-    if (list->start_node == NULL) {
-        list->start_node = node;
-        list->end_node = node;
-    // something has gone wrong
-    } else if (list->end_node == NULL) { 
-        return false;
-    } else {
-        list->end_node->next = node;
-        list->end_node = node;
-    }
-
-    return true;
-}
-
-static void FDList_free(FDList* list) {
-    if (list == NULL) return;
-
-    FDNode* temp;
-    FDNode* head = list->start_node;
-    while (head != NULL) {
-       temp = head;
-       head = head->next;
-       close(temp->p1_input);
-       close(temp->p1_output);
-       close(temp->p2_input);
-       close(temp->p2_output);
-       free(temp);
-    }
-
-    free(list);
-}
-
 static void recurse_pipeline(pthread_t tid[], int count, int debug, FunctionNode* node, int input) {
     if (node == NULL) return;
 
@@ -239,14 +178,6 @@ static void recurse_pipeline(pthread_t tid[], int count, int debug, FunctionNode
     int p2[2];
     if (pipe(p1) < 0) exit_recurse("pipe p1");
     if (pipe(p2) < 0) exit_recurse("pipe p2");
-
-    // adds file descriptors to mutex
-    pthread_mutex_lock(&fd_list_lock);
-    if (!FDList_add(fd_list, p1[0], p1[1], p2[0], p2[1])) {
-        pthread_mutex_unlock(&fd_list_lock);
-        exit_recurse("FDList_add");
-    }
-    pthread_mutex_unlock(&fd_list_lock);
 
     // list of args to pass into thread
     thread_struct* arg = (thread_struct*)malloc(sizeof(thread_struct));
@@ -294,35 +225,12 @@ void Pipeline_execute(Pipeline* p) {
         p->exit_code = -1;
         return;
     }
-    if (pthread_mutex_init(&fd_list_lock, NULL) < 0) {
-        free(exit_sem_name);
-        pthread_mutex_destroy(&pause_lock);
-        process_print("fd_list_lock");
-        p->exit_code = -1;
-        return;
-    }
-
-    // creates linked list to store file descriptors
-    fd_list = (FDList*)malloc(sizeof(FDList));
-    if (fd_list == NULL) {
-        free(exit_sem_name);
-        pthread_mutex_destroy(&pause_lock);
-        pthread_mutex_destroy(&fd_list_lock);
-        process_print("malloc fdlist");
-        p->exit_code = -1;
-        return;
-    }
-    fd_list->start_node = NULL;
-    fd_list->end_node = NULL;
-
     if (debug) fprintf(stderr, "parent: %d, main child: %d\n", getppid(), getpid());
 
     exit_sem = sem_open(exit_sem_name, O_CREAT, 0644, 0);
     if (exit_sem == SEM_FAILED) {
         free(exit_sem_name);
         pthread_mutex_destroy(&pause_lock);
-        pthread_mutex_destroy(&fd_list_lock);
-        free(fd_list);
         process_print("sem_open");
         p->exit_code = -1;
         return;
@@ -377,15 +285,7 @@ void Pipeline_execute(Pipeline* p) {
         end:
             sem_unlink(exit_sem_name); // just to make sure unlinked
             free(exit_sem_name);
-
-            // close all pipe
-            // don't have to worry about calling close on no longer valid fds, as it doesn't do anything
-            pthread_mutex_lock(&fd_list_lock);
-            FDList_free(fd_list); 
-            pthread_mutex_unlock(&fd_list_lock);
-
             pthread_mutex_destroy(&pause_lock);
-            pthread_mutex_destroy(&fd_list_lock);
 
         return;
     }

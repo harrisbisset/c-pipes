@@ -8,6 +8,10 @@
 
 #include <stdbool.h>
 
+/*
+* Input and output descriptors passed to it and must close both before returning, even if unused. 
+* Close output when finished writing so the next stage can receive EOF.
+*/
 typedef void (*Function)(int input, int output);
 
 typedef struct pipeline Pipeline;
