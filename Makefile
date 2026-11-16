@@ -38,22 +38,22 @@ build/ubsan/TestPipeline: build/ubsan/TestPipeline.o build/ubsan/Pipeline.o
 	$(CC) $(SANFLAGS) $(LFLAGS) build/ubsan/TestPipeline.o build/ubsan/Pipeline.o -o build/ubsan/TestPipeline
 
 
-build/TestPipeline.o: TestPipeline.c Pipeline.h PipelineHelper.h Makefile | build
+build/TestPipeline.o: TestPipeline.c Pipeline.h PipelineHelper.h
 	$(CC) $(CFLAGS) TestPipeline.c -o build/TestPipeline.o
 
-build/SievePipeline.o: examples/SievePipeline.c Pipeline.h Makefile | build
+build/SievePipeline.o: examples/SievePipeline.c Pipeline.h
 	$(CC) $(CFLAGS) examples/SievePipeline.c -o build/SievePipeline.o
 
-build/SumSquaresPipeline.o: examples/SumSquaresPipeline.c Pipeline.h Makefile | build
+build/SumSquaresPipeline.o: examples/SumSquaresPipeline.c Pipeline.h
 	$(CC) $(CFLAGS) examples/SumSquaresPipeline.c -o build/SumSquaresPipeline.o
 
-build/Pipeline.o: Pipeline.c Pipeline.h Makefile | build
+build/Pipeline.o: Pipeline.c Pipeline.h
 	$(CC) $(CFLAGS) Pipeline.c -o build/Pipeline.o
 
-build/ubsan/Pipeline.o: Pipeline.c Pipeline.h Makefile | build/ubsan
+build/ubsan/Pipeline.o: Pipeline.c Pipeline.h
 	$(CC) $(SANFLAGS) $(CFLAGS) Pipeline.c -o build/ubsan/Pipeline.o
 
-build/ubsan/TestPipeline.o: TestPipeline.c Pipeline.h PipelineHelper.h Makefile | build/ubsan
+build/ubsan/TestPipeline.o: TestPipeline.c Pipeline.h PipelineHelper.h
 	$(CC) $(SANFLAGS) $(CFLAGS) TestPipeline.c -o build/ubsan/TestPipeline.o
 
 

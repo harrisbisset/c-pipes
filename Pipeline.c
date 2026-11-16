@@ -4,7 +4,6 @@
 */
 
 #define _XOPEN_SOURCE 700
-#define _GNU_SOURCE // for asprintf
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,7 +14,6 @@
 #include <pthread.h> 
 #include <fcntl.h>
 #include <string.h>
-#include <semaphore.h>
 
 #include "Pipeline.h"
 
@@ -80,11 +78,6 @@ struct pipeline {
 };
 
 #define max_threads 6
-
-pthread_mutex_t pause_lock;
-bool pause_exe;
-
-static long pipeline_counter;
 
 Pipeline* new_Pipeline() {
     Pipeline* p = (Pipeline*)malloc(sizeof(Pipeline));
@@ -164,16 +157,6 @@ static void* child(void* arg) {
 static void recurse_pipeline(pthread_t tid[], int count, int debug, FunctionNode* node, int input) {
     if (node == NULL) return;
 
-    // is execution paused?
-    pthread_mutex_lock(&pause_lock);
-    if (pause_exe) {
-        fprintf(stderr, "execution paused\n");
-        pthread_mutex_unlock(&pause_lock);
-        _exit(EXIT_FAILURE);
-        return;
-    }
-    pthread_mutex_unlock(&pause_lock);
-
     int p1[2];
     int p2[2];
     if (pipe(p1) < 0) exit_recurse("pipe p1");
@@ -203,42 +186,33 @@ void Pipeline_execute(Pipeline* p) {
 
     // vars declared here to avoid jump issues
     pthread_t tid[p->length];
-    sem_t* exit_sem;
+    int completion[2];
 
     // process pids
     pid_t container_pid;
 
-    // dynamic name, as pipeline may spawn pipeline children which use the same name
-    pipeline_counter++;
-    char* exit_sem_name = NULL;
-    if (asprintf(&exit_sem_name, "/exit_sem_%ld", pipeline_counter) < 0) {
-        process_print("asprintf exit_sem_name");
+    // private channel avoids shared names and state between executions.
+    if (pipe(completion) < 0) {
+        process_print("completion pipe");
         p->exit_code = -1;
         return;
     }
-    
-    sem_unlink(exit_sem_name); // cleanup if still open, ignore error
+    for (int i = 0; i < 2; i++) {
+        if (fcntl(completion[i], F_SETFD, FD_CLOEXEC) < 0 || fcntl(completion[i], F_SETFL, O_NONBLOCK) < 0) {
+            close(completion[0]);
+            close(completion[1]);
+            process_print("completion pipe flags");
+            p->exit_code = -1;
+            return;
+        }
+    }
 
-    if (pthread_mutex_init(&pause_lock, NULL) < 0) {
-        free(exit_sem_name);
-        process_print("pause_lock");
-        p->exit_code = -1;
-        return;
-    }
     if (debug) fprintf(stderr, "parent: %d, main child: %d\n", getppid(), getpid());
-
-    exit_sem = sem_open(exit_sem_name, O_CREAT, 0644, 0);
-    if (exit_sem == SEM_FAILED) {
-        free(exit_sem_name);
-        pthread_mutex_destroy(&pause_lock);
-        process_print("sem_open");
-        p->exit_code = -1;
-        return;
-    }
 
     container_pid = fork();
     if (container_pid < 0) exit_main("container fork");
     else if (container_pid == 0) { // container child process
+        close(completion[0]); // only need the read end in the parent, not child
 
         if (debug) fprintf(stderr, "parent: %d, container child: %d\n", getppid(), getpid());
         recurse_pipeline(tid, 0, debug, p->start_node, -1); // start pipeline execution
@@ -246,46 +220,52 @@ void Pipeline_execute(Pipeline* p) {
         // wait for running threads to terminate
         for (int i = 0; i < p->length; i++) {
             if (debug) fprintf(stderr, "parent %i: waiting on %dth thread\n", getppid(), i);
-            if (pthread_join(tid[i], NULL) != 0 && debug) fprintf(stderr, "terminated on %dth thread\n", i);
+            int error = pthread_join(tid[i], NULL);
+            if (error != 0) {
+                errno = error;
+                exit_recurse("pthread_join");
+            }
         }
 
-        // update success
-        sem_t* child_exit_sem = sem_open(exit_sem_name, 0);
-        if (child_exit_sem == SEM_FAILED) exit_recurse("sem_open child_exit_sem");
-        if (sem_post(child_exit_sem) < 0) exit_recurse("sem_post child_exit_sem");
-        if (sem_close(child_exit_sem) < 0) exit_recurse("sem_close child_exit_sem");
+        // report completion to the parent process
+        const unsigned char success = 1;
+        ssize_t written = write(completion[1], &success, sizeof(success));
+        if (written != sizeof(success)) exit_recurse("write completion");  // expecting 1 char
 
+        close(completion[1]);
+        
         _exit(EXIT_SUCCESS);
         return;
         
     } else {
+        close(completion[1]); // parent doesn't write, so we close
+        completion[1] = -1; // marks as closed
 
         // wait for child to finish
         int status;
-        int np = waitpid(container_pid, &status, 0);
+        pid_t np;
+        do {
+            np = waitpid(container_pid, &status, 0);
+        } while (np < 0 && errno == EINTR); // blocking, so if process interrupted
+
         if (np < 0) exit_main("waitpid failed");
 
         if (debug) fprintf(stderr, "parent: %d, container parent: %d\n", getppid(), getpid());
 
         // if process didn't exit with exit() or _exit
-        if (!WIFEXITED(status))
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != EXIT_SUCCESS)
             exit_main("container child exited abnormally");
         
-        // check if terminated correctly
-        int exit_status;
-        if (sem_getvalue(exit_sem, &exit_status) < 0)
-            exit_main("failed reading exit_sem");
-        
-        // if child process exited in failure
-        if (WEXITSTATUS(status) != EXIT_SUCCESS || exit_status != 1)
-            exit_main("container child failed");
+        // early from a callback is not successful completion.
+        unsigned char success = 0;
+        ssize_t received = read(completion[0], &success, sizeof(success));
+        if (received != sizeof(success) || success != 1) exit_main("missing completion");
 
         p->exit_code = 0; // success
 
         end:
-            sem_unlink(exit_sem_name); // just to make sure unlinked
-            free(exit_sem_name);
-            pthread_mutex_destroy(&pause_lock);
+            close(completion[0]);
+            if (completion[1] != -1) close(completion[1]); // if not already closed
 
         return;
     }
