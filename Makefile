@@ -1,12 +1,12 @@
 CC = clang
 RM = rm -f
 DFLAG = -g
-GFLAGS = -Wall -Wextra
+GFLAGS = -Wall -Wextra -pthread
 CFLAGS = $(DFLAG) $(GFLAGS) -c
 LFLAGS = $(DFLAG) $(GFLAGS)
 
 test: clean TestPipeline
-	- killall -s 9 TestPipeline
+# 	- killall -s 9 TestPipeline
 	./TestPipeline
 
 all: clean SumSquaresPipeline SievePipeline TestPipeline

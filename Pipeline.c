@@ -39,16 +39,15 @@
 // used to exit from threads
 #define exit_thread(msg) ({                         \
     process_print(msg);                             \
-    free(args);                                     \
     free(arg);                                      \
-    exit(EXIT_FAILURE);                             \
+    _exit(EXIT_FAILURE);                             \
     return NULL;                                    \
 })
 
 // used to exit from the parent process in recurse_pipeline
 #define exit_recurse(msg) ({                \
     process_print(msg);                     \
-    exit(EXIT_FAILURE);                     \
+    _exit(EXIT_FAILURE);                     \
     return;                                 \
 })
 
@@ -144,7 +143,7 @@ bool Pipeline_add(Pipeline* p, Function f) {
 static void* child(void* arg) {
     struct thread_struct* args = (thread_struct*) arg;
     if (args == NULL) {
-        exit(EXIT_FAILURE);
+        _exit(EXIT_FAILURE);
         return NULL;
     }
     int debug = args->debug; // for consistency accross macros
@@ -231,7 +230,7 @@ static void recurse_pipeline(pthread_t tid[], int count, int debug, FunctionNode
     if (pause_exe) {
         fprintf(stderr, "execution paused\n");
         pthread_mutex_unlock(&pause_lock);
-        exit(EXIT_FAILURE);
+        _exit(EXIT_FAILURE);
         return;
     }
     pthread_mutex_unlock(&pause_lock);
@@ -281,23 +280,53 @@ void Pipeline_execute(Pipeline* p) {
     // dynamic name, as pipeline may spawn pipeline children which use the same name
     pipeline_counter++;
     char* exit_sem_name = NULL;
-    if (asprintf(&exit_sem_name, "/exit_sem_%ld", pipeline_counter) < 0)
-        exit_main("asprintf exit_sem_name");
+    if (asprintf(&exit_sem_name, "/exit_sem_%ld", pipeline_counter) < 0) {
+        process_print("asprintf exit_sem_name");
+        p->exit_code = -1;
+        return;
+    }
     
     sem_unlink(exit_sem_name); // cleanup if still open, ignore error
 
-    if (pthread_mutex_init(&pause_lock, NULL) < 0) exit_main("pause_lock");
-    if (pthread_mutex_init(&fd_list_lock, NULL) < 0) exit_main("fd_list_lock");
+    if (pthread_mutex_init(&pause_lock, NULL) < 0) {
+        free(exit_sem_name);
+        process_print("pause_lock");
+        p->exit_code = -1;
+        return;
+    }
+    if (pthread_mutex_init(&fd_list_lock, NULL) < 0) {
+        free(exit_sem_name);
+        pthread_mutex_destroy(&pause_lock);
+        process_print("fd_list_lock");
+        p->exit_code = -1;
+        return;
+    }
 
     // creates linked list to store file descriptors
     fd_list = (FDList*)malloc(sizeof(FDList));
-    if (fd_list == NULL) exit_main("malloc fdlist");
+    if (fd_list == NULL) {
+        free(exit_sem_name);
+        pthread_mutex_destroy(&pause_lock);
+        pthread_mutex_destroy(&fd_list_lock);
+        process_print("malloc fdlist");
+        p->exit_code = -1;
+        return;
+    }
     fd_list->start_node = NULL;
     fd_list->end_node = NULL;
 
     if (debug) fprintf(stderr, "parent: %d, main child: %d\n", getppid(), getpid());
 
     exit_sem = sem_open(exit_sem_name, O_CREAT, 0644, 0);
+    if (exit_sem == SEM_FAILED) {
+        free(exit_sem_name);
+        pthread_mutex_destroy(&pause_lock);
+        pthread_mutex_destroy(&fd_list_lock);
+        free(fd_list);
+        process_print("sem_open");
+        p->exit_code = -1;
+        return;
+    }
 
     container_pid = fork();
     if (container_pid < 0) exit_main("container fork");
@@ -318,7 +347,7 @@ void Pipeline_execute(Pipeline* p) {
         if (sem_post(child_exit_sem) < 0) exit_recurse("sem_post child_exit_sem");
         if (sem_close(child_exit_sem) < 0) exit_recurse("sem_close child_exit_sem");
 
-        exit(EXIT_SUCCESS);
+        _exit(EXIT_SUCCESS);
         return;
         
     } else {
@@ -339,7 +368,6 @@ void Pipeline_execute(Pipeline* p) {
         if (sem_getvalue(exit_sem, &exit_status) < 0)
             exit_main("failed reading exit_sem");
         
-
         // if child process exited in failure
         if (WEXITSTATUS(status) != EXIT_SUCCESS || exit_status != 1)
             exit_main("container child failed");
